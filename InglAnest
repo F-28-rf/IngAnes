@@ -1,0 +1,181 @@
+from kivy.lang import Builder
+from kivy.core.window import Window
+from kivymd.app import MDApp
+from kivymd.uix.menu import MDDropdownMenu
+from kivymd.uix.dialog import MDDialog
+from kivymd.uix.button import MDFlatButton
+from kivymd.uix.list import OneLineListItem
+
+KV = '''
+BoxLayout:
+    orientation: 'vertical'
+    padding: dp(20)
+    spacing: dp(10)
+
+    MDLabel:
+        text: "Расчёт расхода ингаляционных анестетиков"
+        halign: "center"
+        font_style: "H5"
+
+    MDTextField:
+        id: fgf
+        hint_text: "FGF (L/min)"
+        input_filter: 'float'
+        mode: "rectangle"
+
+    MDTextField:
+        id: age
+        hint_text: "Возраст (лет)"
+        input_filter: 'float'
+        mode: "rectangle"
+
+    MDTextField:
+        id: ind_time
+        hint_text: "Время индукции (мин)"
+        input_filter: 'float'
+        mode: "rectangle"
+
+    MDTextField:
+        id: total_time
+        hint_text: "Общая длительность (мин)"
+        input_filter: 'float'
+        mode: "rectangle"
+
+    MDRaisedButton:
+        id: agent_btn
+        text: "Выберите агент"
+        pos_hint: {"center_x": 0.5}
+        on_release: app.open_agent_menu()
+
+    MDRaisedButton:
+        text: "Рассчитать"
+        pos_hint: {"center_x": 0.5}
+        on_release: app.calculate()
+
+    MDLabel:
+        id: result
+        text: ""
+        halign: "center"
+        theme_text_color: "Secondary"
+        size_hint_y: None
+        height: self.texture_size[1] + dp(10)
+
+    ScrollView:
+        size_hint_y: 0.3
+        MDList:
+            id: history_list
+'''
+
+class AnesthesiaApp(MDApp):
+    # Индукционные концентрации (%)
+    IND_CONC = {
+        "Севофлуран": 8.0,
+        "Изофлуран": 5.0,
+        "Десфлуран": 6.0,
+    }
+    # MAC по возрастным группам (%)
+    MAC_TABLE = {
+        "Севофлуран": [
+            (0,    0.083, 3.3),
+            (0.083, 0.5,  3.0),
+            (0.5,  3,    2.8),
+            (3,    12,   2.5),
+            (12,   150,  2.6),
+        ],
+        "Изофлуран": [
+            (0,    150, 1.2),
+        ],
+        "Десфлуран": [
+            (0,    0.083, 9.2),
+            (0.083, 1,    8.0),
+            (1,    150,  6.0),
+        ],
+    }
+    # Константы объёма паров (мл) при 1% концентрации за 1 L потока
+    SOL = {
+        "Севофлуран": 184.0,
+        "Изофлуран": 195.0,
+        "Десфлуран": 210.0,
+    }
+
+    def build(self):
+        Window.softinput_mode = 'pan'
+        self.theme_cls.primary_palette = "Teal"
+        self.history = []
+        self.root = Builder.load_string(KV)
+
+        items = [
+            {"text": name, "on_release": lambda x=name: self.set_agent(x)}
+            for name in self.IND_CONC.keys()
+        ]
+        self.menu = MDDropdownMenu(
+            caller=self.root.ids.agent_btn,
+            items=items,
+            width_mult=4,
+            position="top"
+        )
+        return self.root
+
+    def open_agent_menu(self):
+        Window.release_all_keyboards()
+        self.menu.open()
+
+    def set_agent(self, name):
+        btn = self.root.ids.agent_btn
+        btn.text = name
+        btn.text_color = (0, 0.5, 0.5, 1)
+        self.menu.dismiss()
+
+    def get_mac(self, agent, age):
+        for low, high, mac in self.MAC_TABLE[agent]:
+            if low <= age < high:
+                return mac
+        return self.MAC_TABLE[agent][-1][2]
+
+    def calculate(self):
+        self.root.ids.result.text = ""
+        try:
+            fgf_l = float(self.root.ids.fgf.text)
+            age   = float(self.root.ids.age.text)
+            t_ind = float(self.root.ids.ind_time.text)
+            t_tot = float(self.root.ids.total_time.text)
+            agent = self.root.ids.agent_btn.text
+        except Exception:
+            return self.show_error("Заполните все поля числами!")
+
+        if not (0 < t_ind < t_tot):
+            return self.show_error("Индукция должна быть меньше общей длительности!")
+        if agent not in self.IND_CONC:
+            return self.show_error("Выберите агент из списка!")
+
+        # Концентрации
+        c_ind  = self.IND_CONC[agent]
+        c_main = self.get_mac(agent, age)
+
+        fgf_ml = fgf_l * 1000  # перевод в мл/мин
+        # Расход: V = (FGF_ml × % × t) / (SOL × 100)
+        v_ind  = (fgf_ml * c_ind  * t_ind)  / (self.SOL[agent] * 100)
+        v_main = (fgf_ml * c_main * (t_tot - t_ind)) / (self.SOL[agent] * 100)
+        total  = v_ind + v_main
+
+        result_text = (
+            f"Индукция {c_ind:.1f}% × {t_ind:.1f} мин = {v_ind:.2f} мл\n"
+            f"Поддержание {c_main:.1f}% × {t_tot - t_ind:.1f} мин = {v_main:.2f} мл\n"
+            f"Всего: {total:.2f} мл жидкого агента"
+        )
+        self.root.ids.result.text = result_text
+
+        self.history.append(result_text)
+        self.root.ids.history_list.add_widget(
+            OneLineListItem(text=f"Всего {total:.2f} мл — {agent}")
+        )
+
+    def show_error(self, msg):
+        dialog = MDDialog(
+            text=msg,
+            buttons=[MDFlatButton(text="OK", on_release=lambda d: d.dismiss())]
+        )
+        dialog.open()
+
+if __name__ == "__main__":
+    AnesthesiaApp().run()
